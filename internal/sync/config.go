@@ -3,137 +3,72 @@ package sync
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
-const (
-	scheduleKeyPrefix      = "SCHEDULE_"
-	pagerDutyTokenKey      = "PAGERDUTY_TOKEN"
-	slackTokenKey          = "SLACK_TOKEN"
-	runInterval            = "RUN_INTERVAL_SECONDS"
-	pdScheduleLookaheadKey = "PAGERDUTY_SCHEDULE_LOOKAHEAD"
-	runIntervalDefault     = 60
-)
-
-// Config is used to configure application
-// PagerDutyToken - token used to connect to pagerduty API
-// SlackToken - token used to connect to Slack API
 type Config struct {
-	Schedules                  []Schedule
-	PagerDutyToken             string
-	SlackToken                 string
-	RunIntervalInSeconds       int
-	PagerdutyScheduleLookahead time.Duration
+	Schedules            []Schedule
+	PagerDutyToken       string
+	SlackToken           string
+	RunIntervalInSeconds int
+	RunOnce              bool
 }
 
-// Schedule models a PagerDuty schedule that will be synced with Slack
-// ScheduleIDs - All PagerDuty schedule ID's to sync
-// AllOnCallGroupName - Slack group name for all members of schedule
-// CurrentOnCallGroupName - Slack group name for current person on call
 type Schedule struct {
-	ScheduleIDs            []string
-	AllOnCallGroupName     string
-	CurrentOnCallGroupName string
+	ID     string
+	Handle string
 }
 
-// NewConfigFromEnv is a function to generate a config from env varibles
-// PAGERDUTY_TOKEN - PagerDuty Token
-// SLACK_TOKEN - Slack Token
-// SCHEDULE_XXX="id,name" e.g. 1234,platform-engineer will generate a schedule with the following values
-// ScheduleID = "1234", AllOnCallGroupName = "all-oncall-platform-engineers", CurrentOnCallGroupName: "current-oncall-platform-engineer"
 func NewConfigFromEnv() (*Config, error) {
-	config := &Config{
-		PagerDutyToken:       os.Getenv(pagerDutyTokenKey),
-		SlackToken:           os.Getenv(slackTokenKey),
-		RunIntervalInSeconds: runIntervalDefault,
+	c := &Config{PagerDutyToken: os.Getenv("PAGERDUTY_TOKEN"), SlackToken: os.Getenv("SLACK_TOKEN"), RunIntervalInSeconds: 60}
+	if c.PagerDutyToken == "" || c.SlackToken == "" {
+		return nil, fmt.Errorf("PAGERDUTY_TOKEN and SLACK_TOKEN are required")
 	}
-
-	runInterval := os.Getenv(runInterval)
-	v, err := strconv.Atoi(runInterval)
-	if err == nil {
-		config.RunIntervalInSeconds = v
+	if strings.HasPrefix(c.SlackToken, "xapp-") {
+		return nil, fmt.Errorf("SLACK_TOKEN must be a bot or user OAuth token, not an app-level token")
 	}
-
-	pagerdutyScheduleLookahead, err := getPagerdutyScheduleLookahead()
-	if err != nil {
-		return nil, err
-	}
-	config.PagerdutyScheduleLookahead = pagerdutyScheduleLookahead
-
-	for _, key := range os.Environ() {
-		if strings.HasPrefix(key, scheduleKeyPrefix) {
-			value := strings.Split(key, "=")[1]
-			scheduleValues := strings.Split(value, ",")
-			if len(scheduleValues) != 2 {
-				return nil, fmt.Errorf("expecting schedule value to be a comma separated scheduleId,name but got %s", value)
-			}
-
-			config.Schedules = appendSchedule(config.Schedules, scheduleValues[0], scheduleValues[1])
+	if v, ok := os.LookupEnv("RUN_ONCE"); ok {
+		var err error
+		c.RunOnce, err = strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("RUN_ONCE must be true or false")
 		}
 	}
-
-	if len(config.Schedules) == 0 {
-		return nil, fmt.Errorf("expecting at least one schedule defined as an env var using prefix SCHEDULE_")
+	if v, ok := os.LookupEnv("RUN_INTERVAL_SECONDS"); ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 86400 {
+			return nil, fmt.Errorf("RUN_INTERVAL_SECONDS must be between 1 and 86400")
+		}
+		c.RunIntervalInSeconds = n
 	}
-
-	return config, nil
-}
-
-func allOnCallGroupName(teamName string) string {
-	if strings.HasSuffix(teamName, "s") {
-		return fmt.Sprintf("all-oncall-%s", teamName)
-	}
-
-	return fmt.Sprintf("all-oncall-%ss", teamName)
-}
-
-func appendSchedule(schedules []Schedule, scheduleID, teamName string) []Schedule {
-	currentGroupName := fmt.Sprintf("current-oncall-%s", teamName)
-	allGroupName := allOnCallGroupName(teamName)
-	newScheduleList := make([]Schedule, len(schedules))
-	updated := false
-
-	for i, s := range schedules {
-		if s.CurrentOnCallGroupName != currentGroupName {
-			newScheduleList[i] = s
-
+	seen := map[string]bool{}
+	env := os.Environ()
+	sort.Strings(env)
+	validHandle := regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(key, "SCHEDULE_") {
 			continue
 		}
-
-		updated = true
-
-		newScheduleList[i] = Schedule{
-			ScheduleIDs:            append(s.ScheduleIDs, scheduleID),
-			AllOnCallGroupName:     allGroupName,
-			CurrentOnCallGroupName: currentGroupName,
+		fields := strings.Split(value, ",")
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("%s must contain schedule-id,slack-handle", key)
 		}
+		id, handle := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+		if id == "" || len(handle) > 80 || !validHandle.MatchString(handle) {
+			return nil, fmt.Errorf("invalid schedule ID or Slack handle in %s", key)
+		}
+		if seen[handle] {
+			return nil, fmt.Errorf("duplicate Slack handle %s", handle)
+		}
+		seen[handle] = true
+		c.Schedules = append(c.Schedules, Schedule{ID: id, Handle: handle})
 	}
-
-	if !updated {
-		newScheduleList = append(newScheduleList, Schedule{
-			ScheduleIDs:            []string{scheduleID},
-			AllOnCallGroupName:     allGroupName,
-			CurrentOnCallGroupName: currentGroupName,
-		})
+	if len(c.Schedules) == 0 {
+		return nil, fmt.Errorf("at least one SCHEDULE_ mapping is required")
 	}
-
-	return newScheduleList
-}
-
-func getPagerdutyScheduleLookahead() (time.Duration, error) {
-	result := time.Hour * 24 * 100
-
-	pdScheduleLookahead, ok := os.LookupEnv(pdScheduleLookaheadKey)
-	if !ok {
-		return result, nil
-	}
-
-	v, err := time.ParseDuration(pdScheduleLookahead)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse %s as time.Duration: %w", pdScheduleLookahead, err)
-	}
-
-	return v, nil
+	return c, nil
 }

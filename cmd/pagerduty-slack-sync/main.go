@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,35 +12,33 @@ import (
 )
 
 func main() {
-
-	// Make the stop channel buffered
-	stop := make(chan os.Signal, 1) // Buffer size of 1
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-
+	logrus.SetFormatter(&logrus.JSONFormatter{FieldMap: logrus.FieldMap{logrus.FieldKeyLevel: "severity", logrus.FieldKeyMsg: "message"}})
 	config, err := sync.NewConfigFromEnv()
 	if err != nil {
-		logrus.Errorf("could not parse config, error: %v", err)
-		os.Exit(-1)
-		return
+		logrus.Error(err)
+		os.Exit(1)
 	}
-
-	logrus.Infof("starting, going to sync %d schedules", len(config.Schedules))
-
-	timer := time.NewTicker(time.Second * time.Duration(config.RunIntervalInSeconds))
-
-	for alive := true; alive; {
-		select {
-		case <-stop:
-			logrus.Infof("stopping...")
-			alive = false
-			os.Exit(0)
-		case <-timer.C:
-			err = sync.Schedules(config)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	for {
+		runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := sync.Schedules(runCtx, config)
+		cancel()
+		if err != nil {
+			logrus.Error(err)
+		}
+		if config.RunOnce {
 			if err != nil {
-				logrus.Errorf("could not sync schedules, error: %v", err)
-				os.Exit(-1)
-				return
+				os.Exit(1)
 			}
+			return
+		}
+		timer := time.NewTimer(time.Duration(config.RunIntervalInSeconds) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }

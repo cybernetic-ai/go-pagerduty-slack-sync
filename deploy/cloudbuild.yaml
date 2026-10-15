@@ -1,0 +1,11 @@
+steps:
+  - name: golang:1.27.2
+    entrypoint: sh
+    args:
+      - -ec
+      - go test ./... && go vet ./...
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'build/package/Dockerfile', '-t', '${_IMAGE}', '.']
+images: ['${_IMAGE}']
+options:
+  logging: CLOUD_LOGGING_ONLY
