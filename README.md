@@ -1,74 +1,109 @@
-<p align="center">
-  <img src="./synclogo.png">
-</p>
+# PagerDuty → Slack current-on-call sync
 
+Cybernetic fork: https://github.com/cybernetic-ai/go-pagerduty-slack-sync
 
+Each PagerDuty schedule maps to one Slack user group. The schedule's name becomes
+the group's display name. The explicitly configured Slack handle stays stable.
+Only currently on-call users are members; no all-rotation group is maintained.
+Supports shift-based v3 schedules and legacy v2 schedules, including overrides.
 
-This tool syncs one or more pagerduty schedules to two slack groups per schedule.  The first slack group is a group with everyone who is in the pagerduty schedule and the second contains the current person on call.
-
-For example if you have the following users in a pagerduty schedule:
-
-```
-schedule id: 1234
-user1
-user2
-user3 <= currently on call
-```
-
-Then when you run a sync for the schedule using:
-
-```
-docker run -e RUN_INTERVAL_SECONDS=60 -e SLACK_TOKEN=xxx -e PAGERDUTY_TOKEN=xxx -e SCHEDULE_PLATFORM=1234,platform-engineer kevholditch/pagerduty-slack-sync:latest
+```dotenv
+SCHEDULE_TELEPHONY=P37DOZN,oncall-telephony
+RUN_ONCE=true
+PAGERDUTY_TOKEN=<read-only REST API key>
+SLACK_TOKEN=<bot or user OAuth token>
 ```
 
-The following slack groups would be created:
+Add more `SCHEDULE_` variables with unique handles for other schedules. Handles
+omit `@`. Existing groups are matched by handle; missing groups are created.
+If a schedule is renamed, its Slack display name follows on the next sync.
 
-- `@all-oncall-platform-engineers` => `user1, user2, user3` 
-- `@current-oncall-platform-engineer` => `user3`
-    
-Multiple schedules can be synced at once by passing many env variables beginning with `SCHEDULE_`.  The format for the value that the schedule parameter expects is `<pagerduty schedule id>,<group-name>`.  The `<group name>` will be used to build the two names for the slack groups using the following format:
-    - `all-oncall-<group-name>s` (if `<group-name>` already ends with `s`, no extra `s` is appended)
-    - `current-oncall-<group-name>`
+## Behavior
 
-If there are multiple schedules with the same `<group-name>` are defined, then slack groups contains the combined list of all people for all the given schedules.
-
-For instance given following environment variables:
-```
--e SCHEDULE_TEAM_1=abcd,platform-engineer -e SCHEDULE_TEAM_2=efgh,platform-engineer
-```
-
-This will result in a pair of slack groups with the combined users:
-- `@all-oncall-platform-engineers` => combined list of all users in `abcd` and `efgh` schedules
-- `@current-oncall-platform-engineer` => combined list of current on call users in `abcd` and `efgh` schedules
-
-
-Full parameter list:
-
-| Env Name                     | Description                                                                       | Default Value  | Example                 |
-|:-----------------------------|:----------------------------------------------------------------------------------|:---------------|:------------------------|
-| PAGERDUTY_TOKEN              | Token used to talk to the PagerDuty API                                           | n/a            | xxxxx                   |
-| SLACK_TOKEN                  | Token used to talk to Slack API                                                   | n/a            | xoxp-xxxxxx             |
-| SCHEDULE_<NAME>              | A PagerDuty schedule that you want to sync                                        | n/a            | 1234,platform-engineer  |
-| RUN_INTERVAL_SECONDS         | Run a sync every X seconds                                                        | 60             | 300                     |
-| PAGERDUTY_SCHEDULE_LOOKAHEAD | How far into the future to evaluate Pagerduty schedules (Go time duration format) | 2400h          | 8760h                   |
-
+- Run immediately once with `RUN_ONCE=true`; exit nonzero on any sync failure.
+- Otherwise repeat with `RUN_INTERVAL_SECONDS` (default 60; range 1–86400).
+- Read final schedule assignments at one instant, including concurrent responders.
+- Match PagerDuty email to an active Slack member. Resolve every user before writes.
+- Replace membership only when it differs. Failures preserve the previous membership
+  where possible; a display-name change or group creation may precede a failed write.
+- On confirmed coverage gaps, log a warning and leave the group enabled and its
+  membership unchanged. This deliberately leaves the previous responder tagged.
+- Never enable or disable groups. A manually disabled target produces an error.
+- Each run has a two-minute deadline; individual HTTP calls have a 20-second timeout.
 
 ## Slack permissions
 
-In order for the app to run you will need to create a bot with the following permissions:
-```
-usergroups:read
-usergroups:write
-users:read
-users:read.email
+OAuth scopes: `usergroups:read`, `usergroups:write`, `users:read`, `users:read.email`.
+A bot token works only when the workspace permits it to manage user groups.
+For admin-only group management, use an authorized user's OAuth token instead.
+An app-level `xapp-` token is not used. No Slack events, public endpoint, or message
+posting permission is required.
+
+## Development
+
+Requires Go 1.27.2 (matches the container build).
+
+```sh
+go test -race ./...
+go vet ./...
+go build ./cmd/pagerduty-slack-sync
 ```
 
-If you have locked down your slack so only the admins can create groups then you have two options.  You can either create the slack groups up front and the app will use those or you can give the bot user auth and give it admin perssions:
+Tests use local mock HTTP servers; they do not access real secrets or modify Slack.
+CI validates code only; it does not publish to the original author's Docker Hub.
+
+## Cloud deployment
+
+Project: `internal-tools-511717`; region: `us-central1`.
+Job: `pd-slack-sync`; Scheduler: `pd-slack-sync` at `0 * * * *` UTC (hourly).
+Runtime: 1 vCPU, 512 MiB, one task, one retry, three-minute task timeout.
+No VPC connector, public endpoint, or always-running service is required.
+
+Runtime secrets in Secret Manager:
+- `pd-slack-sync-pd-key`
+- `pd-slack-sync-slack-bot-token`
+
+`pd-slack-sync-slack-app-token` is unused. Secret values are never stored in Git
+or container images. The runtime account has accessor permission only on those
+two secrets. Scheduler has `roles/run.invoker` only on this job.
+
+One-time prerequisites (provisioned for this project): enable Run, Scheduler,
+Artifact Registry, Cloud Build, IAM, and Secret Manager APIs; create the
+`internal-tools` Docker repository, the `internal-tools-511717-pdsync-builds`
+source bucket, and `pd-slack-sync`, `pd-slack-sync-scheduler`, and
+`pd-slack-sync-builder` service accounts. The builder needs Artifact Registry
+Writer on this repository, Object Viewer on the source bucket, and Logs Writer
+on the project. Deployers need permission to build, deploy jobs, manage Scheduler,
+and act as these service accounts.
+
+From a committed checkout, run `./deploy/deploy.sh`. It builds and tests in Cloud
+Build, deploys an immutable image digest, executes the job successfully, then
+creates or updates its hourly schedule. If initial execution fails, fix the error
+before enabling scheduling. Existing schedules are paused during deployment and
+resumed only after successful verification. If deployment fails, fix the issue
+and rerun the deployment script; the schedule stays paused until verification passes.
+
+```sh
+gcloud run jobs executions list --job=pd-slack-sync --region=us-central1 --project=internal-tools-511717
+gcloud run jobs execute pd-slack-sync --region=us-central1 --project=internal-tools-511717 --wait
+gcloud scheduler jobs pause pd-slack-sync --location=us-central1 --project=internal-tools-511717
 ```
-admin.usergroups:read
-admin.usergroups:write
-usergroups:read
-usergroups:write
-users:read
-users:read.email
-```
+
+Check Cloud Run execution failures and `severity=ERROR` logs. A gap emits a warning
+but exits successfully, by design. An hourly poll can lag an override by about an
+hour plus startup time. Monitoring notification channels must be configured to
+receive failure notifications; logging alone does not send alerts.
+`deploy/alert-policy.json` is a failure-alert template. Populate its
+`notificationChannels` with the selected channel resource before applying it.
+
+## Cost
+
+At 720 monthly executions under one minute, 1 vCPU and 512 MiB in us-central1,
+compute is approximately $0.82/month before free-tier allowances; Scheduler is
+$0.10/month unless covered by its free tier. Builds, image/source storage, secrets,
+and logs are additional. Retries and longer runs increase compute costs.
+
+## Upstream
+
+Derived from kevholditch/go-pagerduty-slack-sync under the MIT license. Changes
+are maintained in cybernetic-ai's fork; no upstream pull request is required.
