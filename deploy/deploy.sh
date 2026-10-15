@@ -20,6 +20,12 @@ gcloud builds submit . --project="$PROJECT" --region="$REGION" \
 # Resolve the tag to an immutable image digest.
 DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" --format='value(image_summary.digest)')
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/internal-tools/pd-slack-sync@${DIGEST}"
+# Stop recurring execution while replacing and verifying an existing job.
+SCHEDULE_ACTION=create
+if gcloud scheduler jobs describe "$JOB" --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
+  SCHEDULE_ACTION=update
+  gcloud scheduler jobs pause "$JOB" --project="$PROJECT" --location="$REGION"
+fi
 gcloud run jobs deploy "$JOB" --project="$PROJECT" --region="$REGION" \
   --image="$IMAGE" --service-account="$RUNTIME" \
   --cpu=1 --memory=512Mi --tasks=1 --parallelism=1 --max-retries=1 --task-timeout=180s \
@@ -29,13 +35,13 @@ gcloud run jobs add-iam-policy-binding "$JOB" --project="$PROJECT" --region="$RE
   --member="serviceAccount:${SCHEDULER}" --role=roles/run.invoker --condition=None
 # Prove the runtime can read its secrets and sync before enabling scheduled work.
 gcloud run jobs execute "$JOB" --project="$PROJECT" --region="$REGION" --wait
-SCHEDULE_ACTION=create
-if gcloud scheduler jobs describe "$JOB" --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
-  SCHEDULE_ACTION=update
-fi
 gcloud scheduler jobs "$SCHEDULE_ACTION" http "$JOB" --project="$PROJECT" --location="$REGION" \
   --schedule='0 * * * *' --time-zone=Etc/UTC \
   --uri="https://run.googleapis.com/v2/projects/${PROJECT}/locations/${REGION}/jobs/${JOB}:run" \
   --http-method=POST --headers='Content-Type=application/json' --message-body='{}' \
   --oauth-service-account-email="$SCHEDULER" \
   --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform --max-retry-attempts=0
+
+if [[ "$SCHEDULE_ACTION" == update ]]; then
+  gcloud scheduler jobs resume "$JOB" --project="$PROJECT" --location="$REGION"
+fi

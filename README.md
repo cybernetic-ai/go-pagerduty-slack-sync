@@ -79,7 +79,9 @@ and act as these service accounts.
 From a committed checkout, run `./deploy/deploy.sh`. It builds and tests in Cloud
 Build, deploys an immutable image digest, executes the job successfully, then
 creates or updates its hourly schedule. If initial execution fails, fix the error
-before enabling scheduling.
+before enabling scheduling. Existing schedules are paused during deployment and
+resumed only after successful verification. If deployment fails, fix the issue
+and rerun the deployment script; the schedule stays paused until verification passes.
 
 ```sh
 gcloud run jobs executions list --job=pd-slack-sync --region=us-central1 --project=internal-tools-511717
