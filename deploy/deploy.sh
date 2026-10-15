@@ -36,7 +36,7 @@ gcloud run jobs deploy "$JOB" --project="$PROJECT" --region="$REGION" \
   --set-env-vars='^|^RUN_ONCE=true|SCHEDULE_TELEPHONY=P37DOZN,oncall-telephony' \
   --set-secrets='PAGERDUTY_TOKEN=pd-slack-sync-pd-key:latest,SLACK_TOKEN=pd-slack-sync-slack-bot-token:latest'
 gcloud run jobs add-iam-policy-binding "$JOB" --project="$PROJECT" --region="$REGION" \
-  --member="serviceAccount:${SCHEDULER}" --role=roles/run.invoker --condition=None
+  --member="serviceAccount:${SCHEDULER}" --role=roles/run.invoker
 # Prove the runtime can read its secrets and sync before enabling scheduled work.
 gcloud run jobs execute "$JOB" --project="$PROJECT" --region="$REGION" --wait
 gcloud scheduler jobs "$SCHEDULE_ACTION" http "$JOB" --project="$PROJECT" --location="$REGION" \
