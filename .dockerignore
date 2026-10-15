@@ -3,5 +3,4 @@
 *.env
 *.key
 *.pem
-pagerduty-slack-sync
 docs
