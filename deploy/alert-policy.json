@@ -1,0 +1,22 @@
+{
+  "displayName": "PagerDuty Slack sync execution failed",
+  "documentation": {
+    "content": "The hourly pd-slack-sync Cloud Run job failed after its retry. Check execution logs in internal-tools-511717/us-central1. Slack membership may be stale. Coverage gaps intentionally preserve membership and do not trigger this failure alert.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "enabled": true,
+  "conditions": [{
+    "displayName": "Failed job execution",
+    "conditionThreshold": {
+      "filter": "resource.type = \"cloud_run_job\" AND resource.labels.job_name = \"pd-slack-sync\" AND resource.labels.location = \"us-central1\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\" AND metric.labels.result = \"failed\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0,
+      "duration": "0s",
+      "aggregations": [{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}],
+      "trigger": {"count": 1}
+    }
+  }],
+  "notificationChannels": [],
+  "alertStrategy": {"autoClose": "3600s"}
+}

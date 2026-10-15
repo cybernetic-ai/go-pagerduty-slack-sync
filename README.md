@@ -93,6 +93,8 @@ Check Cloud Run execution failures and `severity=ERROR` logs. A gap emits a warn
 but exits successfully, by design. An hourly poll can lag an override by about an
 hour plus startup time. Monitoring notification channels must be configured to
 receive failure notifications; logging alone does not send alerts.
+`deploy/alert-policy.json` is a failure-alert template. Populate its
+`notificationChannels` with the selected channel resource before applying it.
 
 ## Cost
 
