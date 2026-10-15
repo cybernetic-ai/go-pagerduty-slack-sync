@@ -22,9 +22,13 @@ DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" -
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/internal-tools/pd-slack-sync@${DIGEST}"
 # Stop recurring execution while replacing and verifying an existing job.
 SCHEDULE_ACTION=create
-if gcloud scheduler jobs describe "$JOB" --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
+if STATE=$(gcloud scheduler jobs describe "$JOB" --project="$PROJECT" --location="$REGION" --format='value(state)' 2>/dev/null); then
   SCHEDULE_ACTION=update
-  gcloud scheduler jobs pause "$JOB" --project="$PROJECT" --location="$REGION"
+  case "$STATE" in
+    ENABLED) gcloud scheduler jobs pause "$JOB" --project="$PROJECT" --location="$REGION" ;;
+    PAUSED) ;; # A previous failed deployment may already have paused it.
+    *) echo "Unexpected Scheduler state: $STATE" >&2; exit 1 ;;
+  esac
 fi
 gcloud run jobs deploy "$JOB" --project="$PROJECT" --region="$REGION" \
   --image="$IMAGE" --service-account="$RUNTIME" \
